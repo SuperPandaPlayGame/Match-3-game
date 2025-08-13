@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Match-3 — уровни, таймер и подсказка</title>
+	<style>
+		:root {
+			--tile-size: 54px;
+			--gap-size: 6px;
+
+			--bg: #121212;
+			--panel: #1e1e1e;
+			--text: #eaeaea;
+			--muted: #c7c7c7;
+			--accent: #7bdff2;
+			--danger: #ff6b6b;
+			--success: #98fb98;
+
+			/* Motion controls */
+			--swap-valid-ms: 240ms;
+			--swap-invalid-ms: 160ms;
+			--ghost-fade-ms: 180ms;
+			--ripple-ms: 200ms;
+			--bounce-ms: 140ms;
+			--time-pulse-ms: 1000ms;
+		}
+		/* Respect reduced motion via attribute toggle */
+		html[data-reduce-motion="reduce"] {
+			--swap-valid-ms: 0ms;
+			--swap-invalid-ms: 0ms;
+			--ghost-fade-ms: 0ms;
+			--ripple-ms: 0ms;
+			--bounce-ms: 0ms;
+			--time-pulse-ms: 0ms;
+		}
+
+		* { box-sizing: border-box; }
+		html, body { height: 100%; }
+		body {
+			margin: 0;
+			font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+			background: var(--bg);
+			color: var(--text);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 24px;
+		}
+		.container { max-width: 740px; width: 100%; }
+		.header {
+			background: var(--panel);
+			border: 1px solid #2a2a2a;
+			border-radius: 10px;
+			padding: 14px 16px;
+			margin-bottom: 16px;
+		}
+		.title { margin: 0 0 6px 0; font-size: 18px; font-weight: 700; }
+		.instructions { margin: 0; font-size: 14px; color: var(--muted); }
+		.status {
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 8px 12px;
+			margin-top: 10px;
+			font-size: 14px;
+		}
+		.kv { display: flex; align-items: center; gap: 6px; }
+		.kv .label { color: var(--muted); }
+		.value-strong { font-weight: 700; color: var(--accent); }
+		.value-time { font-weight: 700; }
+		.value-time.safe { color: var(--accent); }
+		.value-time.low { color: #ffd166; }
+		.value-time.danger { color: var(--danger); animation: timePulse var(--time-pulse-ms) ease-in-out infinite; }
+		html[data-reduce-motion="reduce"] .value-time.danger { animation: none; }
+
+		#board {
+			user-select: none;
+			background: var(--panel);
+			border: 1px solid #2a2a2a;
+			border-radius: 10px;
+			padding: calc(var(--gap-size));
+			display: grid;
+			grid-template-columns: repeat(8, var(--tile-size));
+			grid-template-rows: repeat(8, var(--tile-size));
+			gap: var(--gap-size);
+			width: max-content;
+			margin: 0 auto;
+			position: relative; /* for absolute-positioned ghosts */
+			overflow: hidden;
+		}
+		.tile {
+			width: var(--tile-size);
+			height: var(--tile-size);
+			border-radius: 8px;
+			border: 2px solid rgba(0,0,0,0.25);
+			box-shadow: inset 0 0 8px rgba(0,0,0,0.2);
+			cursor: pointer;
+			will-change: transform, opacity;
+		}
+		.tile.selected { outline: 3px solid #ffffff99; outline-offset: -3px; }
+		.tile.empty { background: #1a1a1a; border-color: #141414; }
+		/* 5 цветов */
+		.color0 { background: #e74c3c; } /* red */
+		.color1 { background: #3498db; } /* blue */
+		.color2 { background: #2ecc71; } /* green */
+		.color3 { background: #f1c40f; } /* yellow */
+		.color4 { background: #9b59b6; } /* purple */
+
+		/* Подсказка-кнопка (не меняем поведение) */
+		.tile.hint {
+			outline: 3px dashed #ffffffcc;
+			outline-offset: -3px;
+			box-shadow: 0 0 0 2px #ffffff22 inset;
+		}
+
+		/* Пассивная подсветка «пара уже есть» */
+		.tile.charge {
+			box-shadow: 0 0 0 0 rgba(255,255,255,0.0);
+			animation: chargePulse 2s ease-in-out infinite;
+		}
+		html[data-reduce-motion="reduce"] .tile.charge { animation: none; }
+
+		/* Рябь при очистке линии/колонки */
+		.tile.ripple-h { animation: rippleX var(--ripple-ms) ease-out 1 both; animation-delay: var(--rip-delay, 0ms); }
+		.tile.ripple-v { animation: rippleY var(--ripple-ms) ease-out 1 both; animation-delay: var(--rip-delay, 0ms); }
+		html[data-reduce-motion="reduce"] .tile.ripple-h,
+		html[data-reduce-motion="reduce"] .tile.ripple-v { animation: none; }
+
+		/* Микроподпрыгивание после падения */
+		.tile.bounce { animation: bounceY var(--bounce-ms) ease-out 1 both; }
+		html[data-reduce-motion="reduce"] .tile.bounce { animation: none; }
+
+		/* В момент свопа приглушаем исходные клетки */
+		.tile.is-swapping { opacity: 0.15; }
+
+		/* Госты для свопа и перетаскивания */
+		.swap-ghost, .drag-ghost {
+			position: absolute;
+			width: var(--tile-size);
+			height: var(--tile-size);
+			pointer-events: none;
+			opacity: 0;
+			transform: translate3d(0,0,0);
+			transition: opacity var(--ghost-fade-ms) ease-out, transform var(--swap-valid-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+			will-change: transform, opacity;
+		}
+		.swap-ghost.invalid {
+			transition: opacity var(--ghost-fade-ms) ease-out, transform var(--swap-invalid-ms) ease-out;
+		}
+		/* Внутренний блок для масштабирования без конфликта с translate */
+		.ghost-inner {
+			width: 100%;
+			height: 100%;
+			border-radius: 8px;
+			border: 2px solid rgba(0,0,0,0.25);
+			box-shadow: inset 0 0 8px rgba(0,0,0,0.2);
+		}
+		/* Небольшой «перескок» */
+		.swap-ghost.snap .ghost-inner {
+			animation: snapScale var(--swap-valid-ms) ease-out 1;
+		}
+		html[data-reduce-motion="reduce"] .swap-ghost,
+		html[data-reduce-motion="reduce"] .drag-ghost { transition: none; }
+		html[data-reduce-motion="reduce"] .swap-ghost.snap .ghost-inner { animation: none; }
+
+		.controls {
+			margin-top: 12px;
+			display: flex;
+			gap: 8px;
+			justify-content: center;
+			flex-wrap: wrap;
+		}
+		button {
+			background: #2b2b2b;
+			color: var(--text);
+			border: 1px solid #3a3a3a;
+			border-radius: 8px;
+			padding: 8px 12px;
+			cursor: pointer;
+		}
+		button:hover { background: #333; }
+		button.primary { border-color: #3f7a86; }
+
+		#message { text-align: center; margin-top: 10px; min-height: 18px; color: var(--muted); }
+
+		/* Оверлей конца уровня */
+		.overlay {
+			position: fixed;
+			inset: 0;
+			background: rgba(0,0,0,0.6);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 20px;
+			z-index: 1000;
+		}
+		.hidden { display: none; }
+		.dialog {
+			background: var(--panel);
+			border: 1px solid #2a2a2a;
+			border-radius: 10px;
+			max-width: 420px;
+			width: 100%;
+			padding: 16px 18px;
+			text-align: center;
+		}
+		.dialog h3 { margin: 0 0 8px 0; }
+		.dialog p { margin: 0 0 14px 0; color: var(--muted); }
+		.dialog .dialog-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+		.win { color: var(--success); }
+		.lose { color: var(--danger); }
+
+		/* Keyframes */
+		@keyframes snapScale {
+			0% { transform: scale(1); }
+			70% { transform: scale(1.06); }
+			100% { transform: scale(1); }
+		}
+		@keyframes chargePulse {
+			0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.0); }
+			50% { box-shadow: 0 0 10px 2px rgba(255,255,255,0.15); }
+			100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.0); }
+		}
+		@keyframes rippleX {
+			0% { transform: scaleX(1); }
+			50% { transform: scaleX(1.02); }
+			100% { transform: scaleX(1); }
+		}
+		@keyframes rippleY {
+			0% { transform: scaleY(1); }
+			50% { transform: scaleY(1.02); }
+			100% { transform: scaleY(1); }
+		}
+		@keyframes bounceY {
+			0% { transform: translateY(0); }
+			50% { transform: translateY(3px); }
+			100% { transform: translateY(0); }
+		}
+		@keyframes timePulse {
+			0% { transform: scale(1); filter: brightness(1); }
+			50% { transform: scale(1.04); filter: brightness(1.1); }
+			100% { transform: scale(1); filter: brightness(1); }
+		}
+	</style>
+</head>
+<body>
+	<div class="container">
+		<div class="header">
+			<p class="title">Match-3 (8×8)</p>
+			<p class="instructions">Щёлкните/перетащите для обмена соседних плиток. Соберите 3+ в ряд/колонку. Нажмите «Подсказка» или H.</p>
+			<div class="status">
+				<div class="kv"><span class="label">Уровень:</span><span id="level" class="value-strong">1</span></div>
+				<div class="kv"><span class="label">Счёт:</span><span id="score" class="value-strong">0</span></div>
+				<div class="kv"><span class="label">Цель:</span><span id="target" class="value-strong">0</span></div>
+				<div class="kv"><span class="label">Время:</span><span id="time" class="value-time safe">0</span></div>
+			</div>
+		</div>
+
+		<div id="board" aria-label="Match-3 board" role="grid"></div>
+
+		<div class="controls">
+			<button id="hintBtn" type="button" class="primary" title="Показать возможный ход (H)">Подсказка (H)</button>
+			<button id="resetBtn" type="button" title="Перезапустить с 1 уровня">Сбросить</button>
+		</div>
+
+		<div id="message"></div>
+	</div>
+
+	<div id="overlay" class="overlay hidden" aria-modal="true" role="dialog">
+		<div class="dialog">
+			<h3 id="overlayTitle">Уровень пройден!</h3>
+			<p id="overlayBody">Цель достигнута, так держать!</p>
+			<div class="dialog-actions">
+				<button id="nextLevelBtn" type="button" class="primary">Следующий уровень</button>
+				<button id="retryLevelBtn" type="button">Повторить уровень</button>
+			</div>
+		</div>
+	</div>
+
+	<script>
+		// Глобальные ловушки ошибок — чтобы они не ломали отрисовку
+		window.addEventListener('error', (e) => {
+			console.error('[Unhandled Error]', e.error || e.message, e);
+		});
+		window.addEventListener('unhandledrejection', (e) => {
+			console.error('[Unhandled Rejection]', e.reason || e);
+		});
+
+		(function () {
+			'use strict';
+
+			// Конфигурация
+			const ROWS = 8;
+			const COLS = 8;
+			const NUM_COLORS = 5;
+			const CASCADE_CAP = 50;
+			const LEVELS = [
+				{ target: 40, time: 60 },
+				{ target: 90, time: 70 },
+				{ target: 150, time: 90 },
+				{ target: 220, time: 110 }
+			];
+
+			// Анимационные константы (дубли CSS для удобства)
+			const SWAP_VALID_MS = 240;
+			const SWAP_INVALID_MS = 160;
+			const GHOST_FADE_MS = 180;
+			const RIPPLE_MS = 200;
+			const BOUNCE_MS = 140;
+
+			// Состояние
+			let board = [];              // 2D: number|null
+			let score = 0;
+			let levelIndex = 0;
+			let gameActive = false;
+			let isResolving = false;
+			let selected = null;         // {r,c}|null
+			let dragSource = null;       // {r,c}|null
+			let timerInterval = null;
+			let levelEndTimeMs = 0;
+			let hintTimeoutId = null;
+			let currentHintPair = null;  // {a:{r,c}, b:{r,c}}|null
+			let bootstrapped = false;
+			let timerStarted = false;    // запускается после первого удачного хода
+
+			// Для анимаций
+			let dragGhostEl = null;
+			const landedSet = new Set(); // ключи клеток, куда «приземлились» плитки
+
+			// DOM-элементы (инициализируются позже)
+			let boardEl, levelEl, scoreEl, targetEl, timeEl, messageEl;
+			let resetBtn, hintBtn, overlayEl, overlayTitleEl, overlayBodyEl, nextLevelBtn, retryLevelBtn;
+
+			// Утилиты
+			const safe = (fn, label) => {
+				try { return fn(); } catch (err) {
+					console.error(`[Match-3 Error${label ? ' @ ' + label : ''}]`, err);
+				}
+			};
+			const on = (el, type, handler) => el && el.addEventListener(type, (e) => safe(() => handler(e), `${type} handler`));
+			const randomTile = () => Math.floor(Math.random() * NUM_COLORS);
+			const key = (r, c) => r + ',' + c;
+			const parseKey = (k) => { const [r, c] = k.split(',').map(Number); return { r, c }; };
+			const inBounds = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
+
+			// Reduce motion toggle
+			function syncReduceMotion() {
+				const m = window.matchMedia('(prefers-reduced-motion: reduce)');
+				document.documentElement.setAttribute('data-reduce-motion', m.matches ? 'reduce' : 'no-preference');
+				if (typeof m.addEventListener === 'function') {
+					m.addEventListener('change', () => {
+						document.documentElement.setAttribute('data-reduce-motion', m.matches ? 'reduce' : 'no-preference');
+					}, { once: false });
+				} else if (typeof m.addListener === 'function') {
+					m.addListener(() => {
+						document.documentElement.setAttribute('data-reduce-motion', m.matches ? 'reduce' : 'no-preference');
+					});
+				}
+			}
+
+			// Инициализация DOM ссылок
+			function initDOMRefs() {
+				boardEl = document.getElementById('board');
+				levelEl = document.getElementById('level');
+				scoreEl = document.getElementById('score');
+				targetEl = document.getElementById('target');
+				timeEl = document.getElementById('time');
+				messageEl = document.getElementById('message');
+				resetBtn = document.getElementById('resetBtn');
+				hintBtn = document.getElementById('hintBtn');
+				overlayEl = document.getElementById('overlay');
+				overlayTitleEl = document.getElementById('overlayTitle');
+				overlayBodyEl = document.getElementById('overlayBody');
+				nextLevelBtn = document.getElementById('nextLevelBtn');
+				retryLevelBtn = document.getElementById('retryLevelBtn');
+			}
+
+			// Обновление заголовка
+			function updateHeaderUI() {
+				levelEl.textContent = String(levelIndex + 1);
+				scoreEl.textContent = String(score);
+				targetEl.textContent = String(LEVELS[levelIndex].target);
+			}
+			function setTimeText(secondsLeft) {
+				const cl = timeEl.classList;
+				cl.remove('safe', 'low', 'danger');
+				if (secondsLeft <= 10) cl.add('danger');
+				else if (secondsLeft <= 20) cl.add('low');
+				else cl.add('safe');
+				timeEl.textContent = Math.max(0, secondsLeft) + 's';
+			}
+
+			// Формирование поля без стартовых матчей
+			function createsImmediateMatch(r, c, tile) {
+				if (c >= 2 && board[r][c - 1] === tile && board[r][c - 2] === tile) return true;
+				if (r >= 2 && board[r - 1][c] === tile && board[r - 2][c] === tile) return true;
+				return false;
+			}
+			function initBoard() {
+				board = new Array(ROWS);
+				for (let r = 0; r < ROWS; r++) {
+					board[r] = new Array(COLS);
+					for (let c = 0; c < COLS; c++) {
+						let tile;
+						do { tile = randomTile(); } while (createsImmediateMatch(r, c, tile));
+						board[r][c] = tile;
+					}
+				}
+				boardEl.innerHTML = '';
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						const tileEl = document.createElement('div');
+						tileEl.id = `tile-${r}-${c}`;
+						tileEl.className = 'tile';
+						tileEl.setAttribute('role', 'gridcell');
+						tileEl.dataset.row = String(r);
+						tileEl.dataset.col = String(c);
+						tileEl.draggable = true;
+						attachTileEvents(tileEl);
+						boardEl.appendChild(tileEl);
+					}
+				}
+				renderBoard();
+			}
+
+			// Рендер
+			function updateTileElement(tileEl, value) {
+				tileEl.className = 'tile';
+				if (value === null || value === undefined) tileEl.classList.add('empty');
+				else tileEl.classList.add(`color${value}`);
+			}
+			function renderBoard() {
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						const tileEl = document.getElementById(`tile-${r}-${c}`);
+						if (tileEl) updateTileElement(tileEl, board[r][c]);
+					}
+				}
+				// Пассивная подсветка пар
+				markChargePairs();
+				// Повторное применение визуальной подсказки (кнопки), если активна
+				if (currentHintPair) applyHintHighlight(currentHintPair);
+			}
+
+			// Выбор плитки
+			function setSelected(r, c) {
+				clearSelection();
+				const tileEl = document.getElementById(`tile-${r}-${c}`);
+				if (tileEl) tileEl.classList.add('selected');
+				selected = { r, c };
+			}
+			function clearSelection() {
+				if (selected) {
+					const { r, c } = selected;
+					const tileEl = document.getElementById(`tile-${r}-${c}`);
+					if (tileEl) tileEl.classList.remove('selected');
+				}
+				selected = null;
+			}
+
+			// События плиток
+			function attachTileEvents(tileEl) {
+				on(tileEl, 'click', onTileClick);
+				on(tileEl, 'dragstart', onDragStart);
+				on(tileEl, 'dragover', (e) => e.preventDefault());
+				on(tileEl, 'drop', onDrop);
+				on(tileEl, 'dragend', onDragEnd);
+			}
+			function onTileClick(e) {
+				if (!gameActive || isResolving) return;
+				const el = e.currentTarget;
+				const r = Number(el.dataset.row);
+				const c = Number(el.dataset.col);
+				if (!selected) { setSelected(r, c); return; }
+				if (selected.r === r && selected.c === c) { clearSelection(); return; }
+				const a = { r: selected.r, c: selected.c };
+				const b = { r, c };
+				if (canSwap(a, b)) { clearSelection(); attemptSwap(a, b); }
+				else { setSelected(r, c); }
+			}
+			function onDragStart(e) {
+				if (!gameActive || isResolving) { e.preventDefault(); return; }
+				const el = e.currentTarget;
+				dragSource = { r: Number(el.dataset.row), c: Number(el.dataset.col) };
+				try { e.dataTransfer.setData('text/plain', `${dragSource.r},${dragSource.c}`); } catch {}
+				// Тень-полоска (призрак)
+				spawnDragGhost(dragSource);
+			}
+			function onDragEnd() {
+				removeDragGhost();
+				dragSource = null;
+			}
+			function onDrop(e) {
+				if (!gameActive || isResolving) return;
+				e.preventDefault();
+				let source = dragSource;
+				if (!source) {
+					try {
+						const txt = e.dataTransfer.getData('text/plain');
+						if (txt) {
+							const [sr, sc] = txt.split(',').map(Number);
+							source = { r: sr, c: sc };
+						}
+					} catch {}
+				}
+				if (!source) return;
+				const targetEl = e.currentTarget;
+				const target = { r: Number(targetEl.dataset.row), c: Number(targetEl.dataset.col) };
+				if (canSwap(source, target)) attemptSwap(source, target);
+			}
+
+			// Перестановка/сопоставления
+			function canSwap(a, b) { return Math.abs(a.r - b.r) + Math.abs(a.c - b.c) === 1; }
+			function swapInBoard(a, b) {
+				const tmp = board[a.r][a.c];
+				board[a.r][a.c] = board[b.r][b.c];
+				board[b.r][b.c] = tmp;
+				renderBoard();
+			}
+			function attemptSwap(a, b) {
+				if (!gameActive || isResolving) return;
+				isResolving = true;
+				messageEl.textContent = '';
+				clearHint();
+
+				// Проверка: даст ли своп матч (без изменения состояния)
+				const isValid = swapWouldMatch(a, b);
+
+				// Визуальная анимация
+				animateSwap(a, b, isValid, () => {
+					// Инвалид — просто завершить
+					if (!isValid) { isResolving = false; return; }
+
+					// Валидный своп — теперь применяем, таймер при первом успехе
+					if (!timerStarted) {
+						startTimer(LEVELS[levelIndex].time);
+						timerStarted = true;
+					}
+					swapInBoard(a, b);
+					const matches = findMatches(); // будут (мы проверяли)
+					resolveCascades(matches);
+					if (gameActive && score >= LEVELS[levelIndex].target) endLevel(true);
+					isResolving = false;
+				});
+			}
+
+			// Поиск матчей
+			function findMatches() {
+				const matches = new Set();
+				// Горизонтали
+				for (let r = 0; r < ROWS; r++) {
+					let runColor = null, runStart = 0;
+					for (let c = 0; c <= COLS; c++) {
+						const color = c < COLS ? board[r][c] : null;
+						if (color !== null && color === runColor) continue;
+						const runEnd = c - 1;
+						if (runColor !== null && (runEnd - runStart + 1) >= 3) {
+							for (let k = runStart; k <= runEnd; k++) matches.add(key(r, k));
+						}
+						runColor = color; runStart = c;
+					}
+				}
+				// Вертикали
+				for (let c = 0; c < COLS; c++) {
+					let runColor = null, runStart = 0;
+					for (let r = 0; r <= ROWS; r++) {
+						const color = r < ROWS ? board[r][c] : null;
+						if (color !== null && color === runColor) continue;
+						const runEnd = r - 1;
+						if (runColor !== null && (runEnd - runStart + 1) >= 3) {
+							for (let k = runStart; k <= runEnd; k++) matches.add(key(k, c));
+						}
+						runColor = color; runStart = r;
+					}
+				}
+				return matches;
+			}
+			function removeMatches(matches) {
+				// Рябь по линиям/колонкам
+				triggerRipple(matches);
+
+				if (matches.size > 0) {
+					score += matches.size;
+					scoreEl.textContent = String(score);
+				}
+				for (const k of matches) {
+					const { r, c } = parseKey(k);
+					board[r][c] = null;
+				}
+			}
+			function applyGravity() {
+				for (let c = 0; c < COLS; c++) {
+					let writeRow = ROWS - 1;
+					for (let r = ROWS - 1; r >= 0; r--) {
+						const val = board[r][c];
+						if (val !== null) {
+							board[writeRow][c] = val;
+							if (writeRow !== r) {
+								board[r][c] = null;
+								landedSet.add(key(writeRow, c));
+							}
+							writeRow--;
+						}
+					}
+					for (let r = writeRow; r >= 0; r--) board[r][c] = null;
+				}
+			}
+			function refill() {
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						if (board[r][c] === null) {
+							board[r][c] = randomTile();
+							landedSet.add(key(r, c));
+						}
+					}
+				}
+			}
+			function resolveCascades(initialMatches) {
+				let iterations = 0;
+				let matches = initialMatches || findMatches();
+				while (matches.size > 0 && iterations < CASCADE_CAP) {
+					removeMatches(matches);
+					applyGravity();
+					refill();
+					matches = findMatches();
+					iterations++;
+				}
+				renderBoard();
+
+				// Микроподпрыгивание «приземлившихся»
+				applyBounce(landedSet);
+				landedSet.clear();
+
+				if (iterations >= CASCADE_CAP) {
+					messageEl.textContent = 'Стабилизация ограничена (достигнут лимит).';
+				}
+			}
+
+			// Подсказка
+			function triggerHint() {
+				if (!gameActive || isResolving) return;
+				const pair = findAnyValidMove();
+				clearHint();
+				if (!pair) { messageEl.textContent = 'Доступных ходов не найдено.'; return; }
+				currentHintPair = pair;
+				applyHintHighlight(pair);
+				hintTimeoutId = setTimeout(() => clearHint(), 2500);
+			}
+			function findAnyValidMove() {
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						const here = { r, c };
+						const right = { r, c: c + 1 };
+						const down = { r: r + 1, c };
+						if (inBounds(right.r, right.c) && swapWouldMatch(here, right)) return { a: here, b: right };
+						if (inBounds(down.r, down.c) && swapWouldMatch(here, down)) return { a: here, b: down };
+					}
+				}
+				return null;
+			}
+			function swapWouldMatch(a, b) {
+				const va = board[a.r][a.c];
+				const vb = board[b.r][b.c];
+				board[a.r][a.c] = vb; board[b.r][b.c] = va;
+				const matches = findMatches();
+				board[a.r][a.c] = va; board[b.r][b.c] = vb;
+				return matches.size > 0;
+			}
+			function applyHintHighlight(pair) {
+				const aEl = document.getElementById(`tile-${pair.a.r}-${pair.a.c}`);
+				const bEl = document.getElementById(`tile-${pair.b.r}-${pair.b.c}`);
+				if (aEl) aEl.classList.add('hint');
+				if (bEl) bEl.classList.add('hint');
+			}
+			function clearHint(force) {
+				if (hintTimeoutId) { clearTimeout(hintTimeoutId); hintTimeoutId = null; }
+				if (!currentHintPair && !force) return;
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						const el = document.getElementById(`tile-${r}-${c}`);
+						if (el) el.classList.remove('hint');
+					}
+				}
+				currentHintPair = null;
+			}
+
+			// Уровни и таймер
+			function showOverlay() { overlayEl.classList.remove('hidden'); }
+			function hideOverlay() { overlayEl.classList.add('hidden'); }
+			function startTimer(durationSec) {
+				stopTimer();
+				levelEndTimeMs = Date.now() + durationSec * 1000;
+				tickTime();
+				timerInterval = setInterval(() => safe(tickTime, 'tickTime'), 250);
+			}
+			function stopTimer() {
+				if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+			}
+			function tickTime() {
+				if (!gameActive) return;
+				const msLeft = levelEndTimeMs - Date.now();
+				const secLeft = Math.ceil(msLeft / 1000);
+				setTimeText(Math.max(0, secLeft));
+				if (msLeft <= 0) endLevel(false);
+			}
+			function startLevel(index) {
+				levelIndex = Math.max(0, Math.min(index, LEVELS.length - 1));
+				score = 0;
+				isResolving = false;
+				selected = null;
+				dragSource = null;
+				messageEl.textContent = '';
+				hideOverlay();
+				clearHint(true);
+				initBoard();
+				updateHeaderUI();
+				gameActive = true;
+				timerStarted = false; // не запускать таймер до первого успешного хода
+			}
+			function endLevel(win) {
+				gameActive = false;
+				stopTimer();
+				clearHint(true);
+				overlayTitleEl.textContent = win ? 'Уровень пройден!' : 'Время вышло!';
+				overlayTitleEl.classList.toggle('win', win);
+				overlayTitleEl.classList.toggle('lose', !win);
+				if (win) {
+					overlayBodyEl.textContent = `Отлично! Достигнута цель: ${LEVELS[levelIndex].target}.`;
+					nextLevelBtn.textContent = (levelIndex < LEVELS.length - 1) ? 'Следующий уровень' : 'Сыграть снова';
+				} else {
+					overlayBodyEl.textContent = 'Попробуйте ещё раз уложиться во время.';
+					nextLevelBtn.textContent = (levelIndex < LEVELS.length - 1) ? 'Перейти дальше' : 'Сыграть снова';
+				}
+				showOverlay();
+			}
+
+			// Вспомогательные анимации/подсветки
+
+			// Пара уже есть — мягкий «заряд»
+			function markChargePairs() {
+				// Сброс
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS; c++) {
+						const el = document.getElementById(`tile-${r}-${c}`);
+						if (el) el.classList.remove('charge', 'ripple-h', 'ripple-v', 'bounce', 'is-swapping');
+					}
+				}
+				// Горизонтальные пары (ровно длиной 2)
+				for (let r = 0; r < ROWS; r++) {
+					for (let c = 0; c < COLS - 1; c++) {
+						const color = board[r][c];
+						if (color === null) continue;
+						if (board[r][c + 1] === color) {
+							const leftOk = (c - 1 >= 0) ? board[r][c - 1] !== color : true;
+							const rightOk = (c + 2 < COLS) ? board[r][c + 2] !== color : true;
+							if (leftOk && rightOk) {
+								const e1 = document.getElementById(`tile-${r}-${c}`);
+								const e2 = document.getElementById(`tile-${r}-${c + 1}`);
+								if (e1) e1.classList.add('charge');
+								if (e2) e2.classList.add('charge');
+							}
+						}
+					}
+				}
+				// Вертикальные пары (ровно длиной 2)
+				for (let c = 0; c < COLS; c++) {
+					for (let r = 0; r < ROWS - 1; r++) {
+						const color = board[r][c];
+						if (color === null) continue;
+						if (board[r + 1][c] === color) {
+							const upOk = (r - 1 >= 0) ? board[r - 1][c] !== color : true;
+							const downOk = (r + 2 < ROWS) ? board[r + 2][c] !== color : true;
+							if (upOk && downOk) {
+								const e1 = document.getElementById(`tile-${r}-${c}`);
+								const e2 = document.getElementById(`tile-${r + 1}-${c}`);
+								if (e1) e1.classList.add('charge');
+								if (e2) e2.classList.add('charge');
+							}
+						}
+					}
+				}
+			}
+
+			// Рябь вдоль очищаемых линий/колонок
+			function triggerRipple(matches) {
+				// Горизонтали
+				for (let r = 0; r < ROWS; r++) {
+					let c = 0;
+					while (c < COLS) {
+						if (!matches.has(key(r, c))) { c++; continue; }
+						let start = c;
+						while (c < COLS && matches.has(key(r, c))) c++;
+						let end = c - 1;
+						if (end - start + 1 >= 3) {
+							for (let k = start; k <= end; k++) {
+								const el = document.getElementById(`tile-${r}-${k}`);
+								if (el) {
+									el.style.setProperty('--rip-delay', `${(k - start) * 14}ms`);
+									el.classList.add('ripple-h');
+								}
+							}
+						}
+					}
+				}
+				// Вертикали
+				for (let c = 0; c < COLS; c++) {
+					let r = 0;
+					while (r < ROWS) {
+						if (!matches.has(key(r, c))) { r++; continue; }
+						let start = r;
+						while (r < ROWS && matches.has(key(r, c))) r++;
+						let end = r - 1;
+						if (end - start + 1 >= 3) {
+							for (let k = start; k <= end; k++) {
+								const el = document.getElementById(`tile-${k}-${c}`);
+								if (el) {
+									el.style.setProperty('--rip-delay', `${(k - start) * 14}ms`);
+									el.classList.add('ripple-v');
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Небольшой отскок «приземлившихся»
+			function applyBounce(posSet) {
+				posSet.forEach((k) => {
+					const { r, c } = parseKey(k);
+					const el = document.getElementById(`tile-${r}-${c}`);
+					if (el) {
+						el.classList.add('bounce');
+						setTimeout(() => el.classList.remove('bounce'), BOUNCE_MS + 50);
+					}
+				});
+			}
+
+			// Геометрия клетки
+			function getTileOffset(r, c) {
+				const boardRect = boardEl.getBoundingClientRect();
+				const tileEl = document.getElementById(`tile-${r}-${c}`);
+				const rect = tileEl.getBoundingClientRect();
+				return { left: rect.left - boardRect.left, top: rect.top - boardRect.top };
+			}
+
+			// Призрак для перетаскивания
+			function spawnDragGhost(pos) {
+				removeDragGhost();
+				const color = board[pos.r][pos.c];
+				if (color === null || color === undefined) return;
+				const off = getTileOffset(pos.r, pos.c);
+				const ghost = document.createElement('div');
+				ghost.className = 'drag-ghost';
+				ghost.style.left = off.left + 'px';
+				ghost.style.top = off.top + 'px';
+				const inner = document.createElement('div');
+				inner.className = `ghost-inner color${color}`;
+				ghost.appendChild(inner);
+				boardEl.appendChild(ghost);
+				dragGhostEl = ghost;
+				// плавное появление до 0.18
+				requestAnimationFrame(() => { ghost.style.opacity = '0.18'; });
+			}
+			function removeDragGhost() {
+				if (dragGhostEl && dragGhostEl.parentNode) {
+					dragGhostEl.parentNode.removeChild(dragGhostEl);
+				}
+				dragGhostEl = null;
+			}
+
+			// Анимация свопа (валид/инвалид)
+			function animateSwap(a, b, isValid, onDone) {
+				// Подготовка: вычисляем смещения
+				const offA = getTileOffset(a.r, a.c);
+				const offB = getTileOffset(b.r, b.c);
+				const dx = offB.left - offA.left;
+				const dy = offB.top - offA.top;
+
+				const colorA = board[a.r][a.c];
+				const colorB = board[b.r][b.c];
+
+				// Призраки для обеих плиток
+				const ghostA = document.createElement('div');
+				ghostA.className = 'swap-ghost' + (isValid ? ' snap' : ' invalid');
+				ghostA.style.left = offA.left + 'px';
+				ghostA.style.top = offA.top + 'px';
+				const innerA = document.createElement('div');
+				innerA.className = `ghost-inner color${colorA}`;
+				ghostA.appendChild(innerA);
+
+				const ghostB = document.createElement('div');
+				ghostB.className = 'swap-ghost' + (isValid ? ' snap' : ' invalid');
+				ghostB.style.left = offB.left + 'px';
+				ghostB.style.top = offB.top + 'px';
+				const innerB = document.createElement('div');
+				innerB.className = `ghost-inner color${colorB}`;
+				ghostB.appendChild(innerB);
+
+				boardEl.appendChild(ghostA);
+				boardEl.appendChild(ghostB);
+
+				// Приглушаем исходные клетки
+				const tileElA = document.getElementById(`tile-${a.r}-${a.c}`);
+				const tileElB = document.getElementById(`tile-${b.r}-${b.c}`);
+				if (tileElA) tileElA.classList.add('is-swapping');
+				if (tileElB) tileElB.classList.add('is-swapping');
+
+				// Запуск
+				requestAnimationFrame(() => {
+					ghostA.style.opacity = '1';
+					ghostB.style.opacity = '1';
+
+					// Вперёд
+					ghostA.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+					ghostB.style.transform = `translate3d(${-dx}px, ${-dy}px, 0)`;
+
+					// Для невалидного — возврат назад
+					if (!isValid) {
+						setTimeout(() => {
+							ghostA.style.transform = `translate3d(0px, 0px, 0)`;
+							ghostB.style.transform = `translate3d(0px, 0px, 0)`;
+							setTimeout(cleanup, SWAP_INVALID_MS);
+						}, SWAP_INVALID_MS);
+					} else {
+						// Валидный — завершить после первой фазы
+						setTimeout(cleanup, SWAP_VALID_MS);
+					}
+				});
+
+				function cleanup() {
+					// Убираем призраков и приглушение
+					if (ghostA.parentNode) ghostA.parentNode.removeChild(ghostA);
+					if (ghostB.parentNode) ghostB.parentNode.removeChild(ghostB);
+					if (tileElA) tileElA.classList.remove('is-swapping');
+					if (tileElB) tileElB.classList.remove('is-swapping');
+
+					if (typeof onDone === 'function') onDone();
+				}
+			}
+
+			// Привязка глобальных обработчиков
+			function bindGlobalHandlers() {
+				on(resetBtn, 'click', () => startLevel(0));
+				on(hintBtn, 'click', () => triggerHint());
+				on(document, 'keydown', (e) => { if (e.key === 'h' || e.key === 'H') triggerHint(); });
+				on(nextLevelBtn, 'click', () => {
+					if (levelIndex >= LEVELS.length - 1) startLevel(0);
+					else startLevel(levelIndex + 1);
+				});
+				on(retryLevelBtn, 'click', () => startLevel(levelIndex));
+			}
+
+			// Гарантированный старт только после готовности документа
+			function bootstrap() {
+				if (bootstrapped) return;
+				bootstrapped = true;
+				safe(() => {
+					initDOMRefs();
+					syncReduceMotion();
+					bindGlobalHandlers();
+					startLevel(0);
+				}, 'bootstrap');
+			}
+			function onDocumentReady(cb) {
+				if (document.readyState === 'complete' || document.readyState === 'interactive') {
+					setTimeout(cb, 0);
+				} else {
+					document.addEventListener('DOMContentLoaded', cb, { once: true });
+				}
+				window.addEventListener('load', cb, { once: true });
+				setTimeout(cb, 1500);
+			}
+
+			// Запуск
+			onDocumentReady(bootstrap);
+		})();
+	</script>
+</body>
+</html>
